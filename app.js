@@ -1,5 +1,4 @@
 require("dotenv").config();
-
 const bcrypt = require("bcryptjs");
 const express = require("express");
 const path = require("path");
@@ -8,6 +7,18 @@ const passport = require("passport");
 const LocalStrategy = require("passport-local").Strategy;
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
+
+const MongoDBStore = require("connect-mongodb-session")(session);
+
+var store = new MongoDBStore({
+  uri: process.env.MONGO_URI,
+  collection: "sessions",
+});
+
+// Catch errors
+store.on("error", function (error) {
+  console.log(error);
+});
 
 const mongoDb = process.env.MONGO_URI;
 mongoose.connect(mongoDb, { useUnifiedTopology: true, useNewUrlParser: true });
@@ -70,22 +81,39 @@ app.use(
     secret: process.env.SESSION_SECRET,
     resave: false,
     saveUninitialized: true,
+    store: store,
   })
 );
 
 app.use(passport.initialize());
 app.use(passport.session());
 app.use(express.urlencoded({ extended: false }));
-
-//middleware
 app.use(function (req, res, next) {
   res.locals.currentUser = req.user;
   next();
 });
 
+//middleware
+const authMiddleware = (req, res, next) => {
+  if (!req.user) {
+    if (!req.session.messages) {
+      req.session.messages = [];
+    }
+    req.session.messages.push("You can't access that page before logon.");
+    res.redirect("/");
+  } else {
+    next();
+  }
+};
+
 //index
 app.get("/", (req, res) => {
-  res.render("index");
+  let messages = [];
+  if (req.session.messages) {
+    messages = req.session.messages;
+    req.session.messages = [];
+  }
+  res.render("index", { messages });
 });
 
 //sign-up
@@ -110,17 +138,25 @@ app.post(
   passport.authenticate("local", {
     successRedirect: "/",
     failureRedirect: "/",
+    failureMessage: true,
   })
 );
 
 //log-out
-app.get("/log-out", (req, res, next) => {
-  req.logout(function (err) {
-    if (err) {
-      return next(err);
-    }
+app.get("/log-out", (req, res) => {
+  req.session.destroy(function (err) {
     res.redirect("/");
   });
+});
+
+//restricted
+app.get("/restricted", authMiddleware, (req, res) => {
+  if (!req.session.pageCount) {
+    req.session.pageCount = 1;
+  } else {
+    req.session.pageCount++;
+  }
+  res.render("restricted", { pageCount: req.session.pageCount });
 });
 
 app.listen(3000, () => console.log("app listening on port 3000!"));
