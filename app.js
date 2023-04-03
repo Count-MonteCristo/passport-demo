@@ -1,6 +1,5 @@
 require("dotenv").config();
-var bcrypt = require("bcryptjs");
-
+const bcrypt = require("bcryptjs");
 const express = require("express");
 const path = require("path");
 const session = require("express-session");
@@ -9,13 +8,23 @@ const LocalStrategy = require("passport-local").Strategy;
 const mongoose = require("mongoose");
 const Schema = mongoose.Schema;
 
-//connect to database
+const MongoDBStore = require("connect-mongodb-session")(session);
+
+var store = new MongoDBStore({
+  uri: process.env.MONGO_URI,
+  collection: "sessions",
+});
+
+// Catch errors
+store.on("error", function (error) {
+  console.log(error);
+});
+
 const mongoDb = process.env.MONGO_URI;
 mongoose.connect(mongoDb, { useUnifiedTopology: true, useNewUrlParser: true });
 const db = mongoose.connection;
 db.on("error", console.error.bind(console, "mongo connection error"));
 
-//user model
 const User = mongoose.model(
   "User",
   new Schema({
@@ -24,45 +33,36 @@ const User = mongoose.model(
   })
 );
 
-//set the view engine to ejs
-const app = express();
-app.set("views", __dirname);
-app.set("view engine", "ejs");
-
-app.use(
-  session({
-    secret: process.env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: true,
-  })
-);
-
-//Passport functions
-//Function one : setting up the LocalStrategy
+//passport functions
 passport.use(
-  new LocalStrategy((username, password, done) => {
-    User.findOne({ username: username }, (err, user) => {
-      if (err) {
-        return done(err);
-      }
+  new LocalStrategy(async (username, password, done) => {
+    try {
+      const user = await User.findOne({ username: username });
       if (!user) {
         return done(null, false, { message: "Incorrect username" });
       }
-      bcrypt.compare(password, user.password, (err, result) => {
-        if (result) {
-          return done(null, user);
-        } else {
-          return done(null, false, { message: "Incorrect password" });
-        }
-      });
-      // return done(null, user);
-    });
+      if (
+        bcrypt.compare(password, user.password, (err, res) => {
+          if (res) {
+            // passwords match! log user in
+            return done(null, user);
+          } else {
+            // passwords do not match!
+            return done(null, false, { message: "Incorrect password" });
+          }
+        })
+      )
+        return done(null, user);
+    } catch (err) {
+      return done(err);
+    }
   })
 );
-//Functions two and three: Sessions and serialization
+
 passport.serializeUser(function (user, done) {
   done(null, user.id);
 });
+
 passport.deserializeUser(async function (id, done) {
   try {
     const user = await User.findById(id);
@@ -72,38 +72,53 @@ passport.deserializeUser(async function (id, done) {
   }
 });
 
+const app = express();
+app.set("views", __dirname);
+app.set("view engine", "ejs");
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true,
+    store: store,
+  })
+);
+
 app.use(passport.initialize());
 app.use(passport.session());
 app.use(express.urlencoded({ extended: false }));
-
-//middleware
 app.use(function (req, res, next) {
   res.locals.currentUser = req.user;
   next();
 });
 
-//routes
-app.get("/", (req, res) => {
-  res.render("index");
-});
-app.get("/sign-up", (req, res) => res.render("sign-up-form"));
-app.post(
-  "/log-in",
-  passport.authenticate("local", {
-    successRedirect: "/",
-    failureRedirect: "/",
-  })
-);
-app.get("/log-out", (req, res, next) => {
-  req.logout(function (err) {
-    if (err) {
-      return next(err);
+//middleware
+const authMiddleware = (req, res, next) => {
+  if (!req.user) {
+    if (!req.session.messages) {
+      req.session.messages = [];
     }
+    req.session.messages.push("You can't access that page before logon.");
     res.redirect("/");
-  });
+  } else {
+    next();
+  }
+};
+
+//index
+app.get("/", (req, res) => {
+  let messages = [];
+  if (req.session.messages) {
+    messages = req.session.messages;
+    req.session.messages = [];
+  }
+  res.render("index", { messages });
 });
 
-//controllers
+//sign-up
+app.get("/sign-up", (req, res) => res.render("sign-up-form"));
+
 app.post("/sign-up", async (req, res, next) => {
   try {
     const hashedPassword = await bcrypt.hash(req.body.password, 10);
@@ -115,6 +130,33 @@ app.post("/sign-up", async (req, res, next) => {
   } catch (err) {
     return next(err);
   }
+});
+
+//login
+app.post(
+  "/log-in",
+  passport.authenticate("local", {
+    successRedirect: "/",
+    failureRedirect: "/",
+    failureMessage: true,
+  })
+);
+
+//log-out
+app.get("/log-out", (req, res) => {
+  req.session.destroy(function (err) {
+    res.redirect("/");
+  });
+});
+
+//restricted
+app.get("/restricted", authMiddleware, (req, res) => {
+  if (!req.session.pageCount) {
+    req.session.pageCount = 1;
+  } else {
+    req.session.pageCount++;
+  }
+  res.render("restricted", { pageCount: req.session.pageCount });
 });
 
 app.listen(3000, () => console.log("app listening on port 3000!"));
